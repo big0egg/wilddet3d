@@ -261,110 +261,138 @@ pip install -r requirements.txt
 
 ### 阿里云 PPU 推理环境
 
-本节面向**直接加载已发布权重，对第一人称（ego）图像进行推理、生成预标注**的场景，不涉及训练。目标镜像为 `2.1.0-pytorch2.6.0-ppu-py312-cu128-ubuntu24.04`，通过 VS Code Remote SSH 连接 DSW 实例。
+本节用于在 **WildDet3D 专用 DSW 镜像**中加载阶段 3 权重，先验证单张 RGB 图片，再生成 ego 数据预标注。项目根目录现在是 `/mnt/workspace/wilddet3d`，不再是嵌套的 `WildDet3D/`。本流程不涉及训练；首次使用 FP32，关闭编译和可选 xFormers 加速。
 
-**验证状态（2026-09-30）：已在当前虚拟环境验证 WildDet3D 导入，并在 `HF_HUB_OFFLINE=1` 下读取两个本地模型文件、在 CPU 上完成完整模型构建与权重加载；尚未完成 PPU 扩展运行或真实图像推理验证，不能视为 PPU 推理已经跑通。** 已获准将 SAM3 的 EDT 导入改为按需加载，并为 `build_model()` 增加 LingBot 本地文件参数；未修改依赖清单。下方 PPU 算子与推理检查仍需在实际 DSW 终端执行。
+**验证状态（2026-10-10）：当前默认 Python 导入项目时因缺少 `utils3d` 失败；受限工具中 `ppu-smi` 报驱动未加载，`torch.cuda.is_available()` 为 False。尚未安装本项目依赖、加载本地权重或完成 PPU 图像推理。下列命令是待在实际 DSW 终端执行的适配流程，不是已经跑通的记录。** 旧文档中 2026-09-30 的 Torch 2.6 环境和 CPU 加载结果不能作为当前镜像的验证结论。
 
-| 项目 | 当前确认的信息 |
+| 项目 | 当前检查结果 |
 |---|---|
-| 加速卡 | 单卡 PPU-ZW810E，98304 MiB（96 GiB）设备内存 |
-| 设备状态 | 用户在 DSW 终端执行 `ppu-smi` 可正常识别设备 |
-| 驱动／管理工具 | 驱动 `2.0.0-2e1b14`；PPU-SMI `1.28`；工具显示 HGGC `13.0` |
-| 操作系统／Python | 目标镜像 Ubuntu 24.04；当前 Python 3.12.3 |
-| PyTorch 包版本 | `2.6.0+v0.1.0.ppu2.1.0.oe` |
-| torchvision 包版本 | `0.21.0+v0.1.0.ppu2.1.0.ce` |
-| PyTorch CUDA API／编译入口 | `torch.version.cuda` 为 `12.8`；`/usr/local/PPU_SDK/CUDA_SDK/bin/nvcc` |
-| 初始仓库状态 | SAM3、LingBot-Depth 子模块未初始化；未安装 vis4d、vis4d_cuda_ops、Gradio |
+| 项目目录 | `/mnt/workspace/wilddet3d` |
+| 系统／Python | Ubuntu 24.04.2；Python 3.12.3；`/usr/local/bin/python3` |
+| PyTorch／torchvision／torchaudio | `2.9.0`／`0.24.0`／`2.9.0` |
+| CUDA API／PPU SDK | `torch.version.cuda == "13.0"`；SDK `2.1.0-a5f865` |
+| 编译入口 | `/usr/local/PPU_SDK/CUDA_SDK/bin/nvcc` |
+| Triton | `3.5.0+gitcc5446cf`，先保留镜像版本 |
+| Torch 运行库 | 动态链接指向 PPU SDK；不能因包版本没有 PPU 后缀就认定是普通 NVIDIA 包 |
+| 项目依赖 | 默认 Python 缺少 utils3d、vis4d、vis4d_cuda_ops、timm、ftfy、Gradio |
+| 模型文件 | 两份 OSS 源文件存在；指定的本地副本尚不存在 |
+| 输入图片 | `/mnt/workspace/ego/images` 尚不存在；首次可用 `demo/vlm/assets/` 中的测试图片 |
+| 存储 | `/mnt/workspace` 所在盘剩余约 13 GB；`/tmp` 约 305 GB，都是检查时快照 |
+| 设备容量 | 旧记录为单卡 ZW810E、96 GiB；当前工具未能读取设备，需实际终端复核 |
 
-PPU 的兼容层允许继续使用 `device="cuda"`、`.cuda()` 等接口，不应仅因硬件名称是 PPU 就把它们改为 `.ppu()`。**保留镜像预装的 PPU 专用 torch／torchvision**；镜像名称中的 `cu128` 不代表可以安装普通 NVIDIA CUDA wheel。PPU 提供源码级兼容，其设备二进制不能与 NVIDIA 混用；CUDA 扩展需经 PPU 工具链重新编译。参阅[阿里云 SDK 兼容性说明](https://help.aliyun.com/en/document_detail/2997009.html)及[PPU 编译器指南](https://help.aliyun.com/zh/document_detail/3030344.html)。这些通用说明并不等于 WildDet3D 已获得 PPU 兼容认证。
+PPU 兼容接口仍使用 `device="cuda"`、`.cuda()` 和 CUDA Stream。保留镜像预装的软件栈，不执行上面的 NVIDIA Torch 安装命令。PPU 的 CUDA API 兼容能力不等于本模型全部算子已通过验证；参阅[阿里云 SDK 说明](https://help.aliyun.com/en/document_detail/2997009.html)及[PPU 编译器指南](https://help.aliyun.com/zh/document_detail/3030344.html)。如果后续镜像版本变化，重新执行以下检查，不按旧版本号强制降级。
 
-#### 1. 在实际 DSW 终端检查设备和基础算子
+#### 1. 在实际 DSW 终端验证设备
 
-以下命令在 VS Code 的**远程终端**中执行，而不是本地电脑终端。先检查镜像的原始 Python，再建立虚拟环境。`ppu-smi` 的 HGGC 版本与 PyTorch 的 CUDA API 版本含义不同，不需要因为两者不同就更换 SDK。
+在 VS Code SSH 的远程终端执行，先使用镜像基础 Python。设备查询、矩阵运算、NMS、Stream 和标准 SDPA 都通过后，再安装项目依赖。
 
 ```bash
-cd /mnt/workspace/WildDet3D
+cd /mnt/workspace/wilddet3d
 ppu-smi
-command -v python nvcc
+command -v python3 nvcc
 nvcc --version
-python -m pip show torch torchvision
+/usr/local/bin/python3 -m pip show torch torchvision
 
-python -B - <<'PY'
+/usr/local/bin/python3 -B - <<'PY'
 import torch
+import torch.nn.functional as F
 import torchvision
-from torchvision.ops import nms
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.cpp_extension import CUDA_HOME
+from torchvision.ops import nms
 
-print("PyTorch:", torch.__version__)
+print("Python 使用的 PyTorch:", torch.__version__, torch.__file__)
 print("torchvision:", torchvision.__version__)
-print("CUDA API:", torch.version.cuda)
-print("CUDA_HOME:", CUDA_HOME)
-assert torch.cuda.is_available(), "当前 Python 无法访问 PPU，请先检查实例设备挂载和驱动"
+print("CUDA API:", torch.version.cuda, "CUDA_HOME:", CUDA_HOME)
+assert torch.cuda.is_available(), "当前解释器无法访问 PPU，先检查实际实例设备挂载和运行库"
 print("设备:", torch.cuda.get_device_name(0))
 
 x = torch.ones((16, 16), device="cuda")
-assert torch.allclose(x @ x, torch.full_like(x, 16))
+stream = torch.cuda.Stream()
+with torch.cuda.stream(stream):
+    y = x @ x
+stream.synchronize()
+assert torch.allclose(y, torch.full_like(y, 16))
 boxes = torch.tensor([[0., 0., 10., 10.], [1., 1., 9., 9.]], device="cuda")
 scores = torch.tensor([0.9, 0.8], device="cuda")
 assert nms(boxes, scores, 0.5).tolist() == [0]
+q = torch.randn(1, 2, 16, 32, device="cuda")
+with sdpa_kernel(SDPBackend.MATH):
+    attention = F.scaled_dot_product_attention(q, q, q)
+assert attention.shape == q.shape and torch.isfinite(attention).all()
 torch.cuda.synchronize()
-print("PPU 矩阵运算与 torchvision NMS 检查通过")
+print("PPU 基础算子检查通过")
 PY
 ```
 
-必须同时确认设备查询和 Python 算子检查通过。若受限工具环境报告驱动未加载，而 DSW 终端正常，应以实际运行项目的终端继续验证；不要据此重装驱动。源码中使用了 CUDA Stream，不能把 CPU 回退当作已适配 PPU。
+若受限工具失败而 DSW 终端正常，继续在正常终端验证，不据此重装驱动。若实际终端也失败，先解决实例设备可见性；CPU 导入或模型构建通过不能替代 PPU 前向验证。
 
-#### 2. 建立复用 PPU 包的虚拟环境
+#### 2. 准备项目专用镜像与虚拟环境
 
-使用镜像自带的 Python 3.12 创建环境，并通过 `--system-site-packages` 读取预装的 PPU 包。不要按 NVIDIA 路径另建 Python 3.11 环境再安装普通 torch。首次使用下列环境目录；如目录已存在，先确认它确实属于本项目。
+每个项目使用独立镜像隔离系统软件栈。venv 在该镜像内选择 Python 和项目依赖，作用类似 Conda 环境，但不提供独立的 PPU 驱动；`--system-site-packages` 会继承基础包及其冲突。采用独立环境目录，不复用 ManiSkill 或 3d-mood 的环境。
+
+**先处理专用镜像中的已知冲突。** 当前镜像预装的 `vllm==0.17.1+cu130` 要求 `pydantic>=2.12`、`opencv-python-headless>=4.13`，后者在 Python 3.12 要求 NumPy ≥ 2；[vis4d 1.0.0](https://pypi.org/pypi/vis4d/1.0.0/json)及 SAM3 要求 NumPy < 2，vis4d 还要求 Pydantic < 2。只新增一个继承系统包的 venv 不能消除这些冲突。
+
+推荐使用不包含 vLLM 服务依赖的 PPU PyTorch 基础镜像。如果使用当前镜像的 **WildDet3D 专用副本，且其中不再运行 vLLM 或其他项目**，可记录依赖基线后移除 vLLM 和已有 OpenCV 提供者，后续仅安装 `opencv-python==4.11.0.86`。以下命令会修改该专用实例的基础 Python 包，不应在仍承担其他项目任务的实例执行。不会卸载 Torch、torchvision、torchaudio 或 Triton。
 
 ```bash
-python -m venv --system-site-packages /mnt/workspace/venvs/wilddet3d-ppu
-source /mnt/workspace/venvs/wilddet3d-ppu/bin/activate
-python -m pip --version
-python -m pip check  # 记录安装前已有的依赖冲突，供后续对比
+mkdir -p /mnt/workspace/wilddet3d-runtime
+/usr/local/bin/python3 -m pip freeze > /mnt/workspace/wilddet3d-runtime/base-packages-before.txt
+/usr/local/bin/python3 -m pip check > /mnt/workspace/wilddet3d-runtime/base-check-before.txt 2>&1 || true
 
-cd /mnt/workspace/WildDet3D
-git submodule update --init --recursive
-git submodule status
+# 仅在上述 WildDet3D 专用镜像条件成立时执行。
+/usr/local/bin/python3 -m pip uninstall -y vllm \
+    opencv-python-headless opencv-python \
+    opencv-contrib-python-headless opencv-contrib-python
+
+/usr/local/bin/python3 -m venv --system-site-packages /mnt/workspace/venvs/wilddet3d-ppu
+source /mnt/workspace/venvs/wilddet3d-ppu/bin/activate
+cd /mnt/workspace/wilddet3d
+python -m pip --version
+python -m pip check > /mnt/workspace/wilddet3d-runtime/base-check-after-cleanup.txt 2>&1 || true
+
+# 只检查源码是否齐全，不改第三方目录。
+test -f third_party/sam3/sam3/model_builder.py
+test -f third_party/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+test -f third_party/lingbot_depth/mdm/model/v2.py
 ```
 
-子模块版本应与主仓库记录一致，不要额外执行 `git submodule update --remote`。仅推理不需要克隆 MoGe；其损失函数在训练时才延迟导入。VS Code 中将 Python 解释器选择为 `/mnt/workspace/venvs/wilddet3d-ppu/bin/python`。
+环境目录已存在时先核实其 Python、`pyvenv.cfg` 和用途，复用属于本项目的环境，不覆盖其他环境。VS Code 解释器选择 `/mnt/workspace/venvs/wilddet3d-ppu/bin/python`。
 
-#### 3. 生成安装清单，保护镜像的 PPU 包
+当前仓库已把 `third_party/sam3`、`third_party/lingbot_depth` 的源码作为普通文件跟踪；不要因保留了 `.gitmodules` 就执行子模块初始化或更新，避免丢失已有适配。仅推理无需 MoGe。当前代码已保留 SAM3 EDT 按需导入，以及 `build_model(..., lingbot_pretrained_model=...)` 本地文件参数。
 
-根目录 `requirements.txt` 固定 `torch==2.5.1`、`torchvision==0.20.1`，因此**不要在此环境直接执行 `pip install -r requirements.txt`**。以下命令在虚拟环境目录生成临时安装材料，过滤这两个固定版本及仅数据准备使用的 `pyarrow`，不改仓库原文件；同时按已安装包的完整版本约束 PPU 组件。
+#### 3. 安装依赖并保护 PPU 软件栈
+
+**不要直接执行 `pip install -r requirements.txt`**：其中固定了 NVIDIA 路径使用的 Torch 2.5.1 和 torchvision 0.20.1。以下在虚拟环境目录生成安装材料，不改仓库原文件；固定当前 PPU 核心包版本并过滤训练数据准备使用的 pyarrow。
 
 ```bash
-python - <<'PY'
+python -B - <<'PY'
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 import re
 import sys
 
+assert sys.prefix != sys.base_prefix, "先激活 wilddet3d-ppu"
 target = Path(sys.prefix)
-assert sys.prefix != sys.base_prefix, "请先激活 wilddet3d-ppu 虚拟环境"
-constraints = []
+protected = []
 for name in ("torch", "torchvision", "torchaudio", "triton"):
     try:
-        constraints.append(f"{name}=={version(name)}")
+        protected.append(f"{name}=={version(name)}")
     except PackageNotFoundError:
         if name in ("torch", "torchvision"):
             raise
-# 与 vis4d 的 NumPy 1.x 约束、SAM3 的 pkg_resources 导入保持一致。
-# 其余范围用于减少上游大版本变化；仍须通过后面的实际导入／推理验证。
-constraints += [
-    "numpy<2", "setuptools<80", "opencv-python<4.12",
-    "transformers<5", "huggingface_hub<1",
+(target / "ppu-core-versions.txt").write_text("\n".join(protected) + "\n")
+constraints = protected + [
+    "numpy==1.26.4", "pydantic==1.10.26", "opencv-python==4.11.0.86",
+    "setuptools<80", "timm>=1.0.17", "transformers<5", "huggingface_hub<1",
 ]
 (target / "ppu-constraints.txt").write_text("\n".join(constraints) + "\n")
-lines = Path("requirements.txt").read_text().splitlines()
 filtered = []
-for line in lines:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
+for line in Path("requirements.txt").read_text().splitlines():
+    text = line.strip()
+    if not text or text.startswith("#"):
         continue
-    if re.match(r"^(torch|torchvision|pyarrow)(?:\s|[<>=!~;\[]|$)", stripped):
+    if re.match(r"^(torch|torchvision|pyarrow)(?:\s|[<>=!~;\[]|$)", text):
         continue
     filtered.append(line)
 (target / "wilddet3d-inference-requirements.txt").write_text("\n".join(filtered) + "\n")
@@ -372,74 +400,72 @@ print((target / "ppu-constraints.txt").read_text())
 PY
 
 export PIP_CONSTRAINT="$VIRTUAL_ENV/ppu-constraints.txt"
+mkdir -p /tmp/wilddet3d-build /tmp/wilddet3d-pip-cache
+export TMPDIR=/tmp/wilddet3d-build
+export PIP_CACHE_DIR=/tmp/wilddet3d-pip-cache
 
-# 先查看解析结果；如果提出替换 torch／torchvision，先停止并检查环境。
+# 先看解析结果，遇到核心包替换或约束冲突，停止并定位。
 python -m pip install --dry-run vis4d==1.0.0 \
     -r "$VIRTUAL_ENV/wilddet3d-inference-requirements.txt" ninja wheel psutil
 
-# 确认解析结果后，再执行实际安装。
+# 解析结果符合约束后再执行。
 python -m pip install vis4d==1.0.0 \
     -r "$VIRTUAL_ENV/wilddet3d-inference-requirements.txt" ninja wheel psutil
+
+python -B - <<'PY'
+from importlib.metadata import version
+from pathlib import Path
+import sys
+import cv2
+import numpy
+import pkg_resources
+import utils3d
+
+for line in (Path(sys.prefix) / "ppu-core-versions.txt").read_text().splitlines():
+    name, expected = line.split("==", 1)
+    assert version(name) == expected, (name, version(name), expected)
+assert hasattr(utils3d.pt, "depth_map_to_point_map"), "utils3d API 与本项目不匹配"
+assert hasattr(utils3d, "np"), "utils3d 缺少 NumPy 后端"
+print("核心包版本保持不变；OpenCV:", cv2.__version__, cv2.__file__)
+print("NumPy:", numpy.__version__, "utils3d:", utils3d.__file__)
+PY
+python -m pip check
 ```
 
-约束文件的作用是遇到不兼容依赖时让 pip 报错，而不是悄悄替换 PPU 包。`--system-site-packages` 并不意味着虚拟环境完全隔离：新增版本会在虚拟环境中遮蔽系统包，仍应核对解析结果。若提示找不到这些带 PPU 后缀的版本，先核实是否正在使用正确的镜像 Python 和虚拟环境，不要删除保护约束改装普通包。
+这里的依赖约束是待验证的安装方案，不是已经测得的完整兼容矩阵。`utils3d` 必须来自清单中的 `EasternJournalist/utils3d` Git 仓库；若当前上游版本缺少项目使用的 API，先记录提交并选择匹配版本，不能以同名无关包或空模块代替。完整推理通过后记录 Git 依赖的提交以便复现。
 
-`utils3d` 必须来自 `EasternJournalist/utils3d` Git 仓库，不能以 PyPI 上同名的无关包替代。这里沿用根目录依赖清单的 Git 地址。不要直接叠加 `demo/huggingface/requirements.txt`：它的 `pydantic>=2` 与 vis4d 的约束冲突，也包含不适合直接照搬的 `utils3d` 条目，详见[网页演示说明](#vscode-ssh)。
+`setuptools<80` 沿用项目约束；当前 80.10.2 中 `pkg_resources` 实际仍可导入，不能把旧文档的“80+ 一律移除”当作实测结论。不要叠加网页依赖清单。`pip check` 中的 protobuf、click、urllib3 等基础镜像冲突需与两份基线对照，识别受影响包；项目新增冲突必须解决，不能宣称全部依赖通过。若清理 vLLM 后仍有其他包要求 Pydantic 2 或 NumPy 2，继续精简专用基础镜像或换合适的 PPU PyTorch 镜像，不忽略依赖硬装。
 
 <a id="ppu-opencv-system-libs"></a>
 
-**补充 OpenCV 系统运行库（Ubuntu 24.04）**
-
-当前使用的 `opencv-python` 包依赖 OpenGL 和 GLib 系统动态库。精简的 DSW 镜像可能未包含这些库，使 `import cv2` 失败，并通过 `vis4d.data.transforms.resize` 阻断 WildDet3D 导入。已确认本实例缺少以下库：
-
-| 缺失动态库 | Ubuntu 24.04 对应软件包 |
-|---|---|
-| `libGL.so.1` | `libgl1` |
-| `libgthread-2.0.so.0`、`libglib-2.0.so.0` | `libglib2.0-0t64` |
-
-在服务器 SSH 终端执行以下命令；当前用户为 root，无需 `sudo`。可以保持虚拟环境激活，但 `apt-get` 安装的是实例的系统运行库，不是虚拟环境中的 Python 包。这一步无需修改项目代码或重装 PyTorch，也不要同时混装多个提供 `cv2` 的 OpenCV 包。
+**OpenCV 系统运行库按实际错误补齐。** 本次 `import cv2` 成功，`libGL.so.1`、GLib 和 GThread 均可找到，不需照搬旧记录重复安装。如果新的专用镜像使用 opencv-python 后出现这些库缺失，再执行：
 
 ```bash
 apt-get update
 apt-get install -y --no-install-recommends libgl1 libglib2.0-0t64
-
-# 使用已激活的 wilddet3d-ppu 环境，先单独验证 OpenCV。
-python -B -c 'import cv2; print("OpenCV 导入通过:", cv2.__version__)'
+python -B -c 'import cv2; print(cv2.__version__, cv2.__file__)'
 ```
 
-完成后继续第 4 步的扩展编译与项目导入检查。如果之前已经编译过扩展，只因缺少上述动态库而导入失败，则不需要因此重新编译，可直接重新执行：
+这些是系统包；仅修复相应动态库错误，不代表模型推理已经通过。多个 OpenCV 发行包共享 `cv2` 命名空间，应只保留一个提供者；参阅 [OpenCV 安装说明](https://pypi.org/project/opencv-python/4.11.0.86/)。
 
-```bash
-cd /mnt/workspace/WildDet3D
-python -B -c 'from wilddet3d import build_model, preprocess; print("WildDet3D 导入通过")'
-python -m pip check
-```
+#### 4. 编译扩展并验证导入
 
-上述命令用于修复并验证 OpenCV 的动态库问题；出现新的异常时，应按新的完整堆栈继续定位，不能将补齐系统库等同于模型推理已通过。
+先在激活的虚拟环境重新确认 PPU 可见。另一个项目环境已有通过 PPU 编译器构建的 vis4d 扩展，CPU 自身 IoU 检查结果为 1；这提供编译参考，但不证明本项目的 PPU 扩展运行通过。当前项目仍应在自己的环境安装并验证。
 
-#### 4. 用 PPU 工具链编译 vis4d_cuda_ops
-
-仅在第 1 步的 `torch.cuda.is_available()` 和算子检查通过后编译。上游构建脚本依据设备可见性选择 CUDA 或 CPU 扩展，设备不可见时“安装成功”并不代表编译出了 PPU 算子。参阅[上游构建脚本](https://github.com/SysCV/vis4d_cuda_ops/blob/main/setup.py)。
+[上游构建脚本](https://github.com/SysCV/vis4d_cuda_ops/blob/d2478d80045b62f85be19235981a63ea9bc8db66/setup.py)只有在设备可见且找到 CUDA_HOME 时才加入设备源码，设备不可见时可能只构建 CPU 扩展。这里固定该源码提交，减少上游变化；若此提交需要补丁，先保留编译日志并确定修改范围。
 
 ```bash
 export CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK
 export PATH="$CUDA_HOME/bin:$PATH"
 export MAX_JOBS=4
+python -B -c 'import torch; assert torch.cuda.is_available(), "PPU 不可见，停止编译"'
 command -v nvcc
 nvcc --version
 
-# ninja 已在上一步安装；--no-deps 防止扩展安装再次解析核心依赖。
-# --no-build-isolation 使编译使用当前环境的 PPU PyTorch。
 python -m pip install \
-    git+https://github.com/SysCV/vis4d_cuda_ops.git \
+    git+https://github.com/SysCV/vis4d_cuda_ops.git@d2478d80045b62f85be19235981a63ea9bc8db66 \
     --no-build-isolation --no-cache-dir --no-deps
-```
 
-这里的 `nvcc` 应是 PPU SDK 的兼容编译入口，不是另行安装的 NVIDIA Toolkit。不要照抄其他 GPU 的 `TORCH_CUDA_ARCH_LIST`。若发生架构、PTX、编译选项或未支持算子错误，保留完整编译日志后再评估补丁；当前文档不保证该扩展能无修改编译。
-
-编译后运行小规模检查，验证 3D IoU 在 PPU 上执行，而不只检查模块能否导入：
-
-```bash
 python -B - <<'PY'
 import torch
 from vis4d_cuda_ops import iou_box3d
@@ -456,30 +482,31 @@ PY
 
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export SAM3_COMPILE=0
+export XFORMERS_DISABLED=1
+export HF_HUB_OFFLINE=1
 python -B -c 'from wilddet3d import build_model, preprocess; print("WildDet3D 导入通过")'
 python -m pip check
 ```
 
-`pip check` 可能同时报告继承自基础镜像的包冲突，应与安装前环境区分，但不能把新出现的项目依赖冲突当作验证通过。若 SAM3 或其他模块报 Triton／FlashAttention／xFormers 相关错误，需检查准确的导入路径并使用匹配当前 PPU SDK 的包；**不要直接安装 NVIDIA 版本，也不要用空模块绕过错误**。关闭 `SAM3_COMPILE` 不能消除所有可能的底层加速库依赖。
+`XFORMERS_DISABLED=1` 使用 LingBot 源码已有开关，让普通张量注意力走 PyTorch SDPA；首次验证不加载可选 xFormers 内核，仍在 PPU 上运行。完整模型是否可用需下一步验证；涉及嵌套张量或新错误时另行分析。不要安装普通 NVIDIA 的 FlashAttention、xFormers 或 Triton 覆盖镜像包，也不要设置其他硬件的 `TORCH_CUDA_ARCH_LIST`。后续可在单图流程通过后评估 BF16、xFormers 与编译优化。
 
-本实例的基础环境还存在 `mkl==2021.1.1` 缺少 `intel-openmp==2021.*`、`tbb==2021.*` 的依赖问题，虚拟环境会通过 `--system-site-packages` 继承这些信息。这与 OpenCV 缺少 `libGL.so.1` 是两件事，安装 OpenGL／GLib 不会消除 MKL 的提示；应单独评估处理，不能宣称 `pip check` 已全部通过。`libjpeg.so.8` 的 torchvision 警告及 `timm.models.layers` 的弃用警告也不是此次 OpenCV 导入中断的原因。
+#### 5. 从 OSS 复制权重并验证模型加载
 
-#### 5. 从 OSS 挂载复制推理权重到本地，并准备深度模型配置来源
+只需要阶段 3 的 WildDet3D 文件和 LingBot 的 `model.pt`，不用阶段 1／2 权重或训练数据。
 
-只需要阶段 3 的 WildDet3D 权重，以及 LingBot-Depth 的 `model.pt`，不需要阶段 1／2 或训练数据集。由于 DSW 访问外网下载较慢，这两个文件已存放在 OSS 挂载中；本流程每次运行前将它们复制到本地暂存目录，再通过显式文件路径加载。
+| 用途 | OSS 源文件 | 本地副本 |
+|---|---|---|
+| WildDet3D 阶段 3 | `/mnt/lvyifan/wilddet3d_alldata_all_prompt_v1.0.pt` | `/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt` |
+| LingBot 配置与模型 | `/mnt/lvyifan/model.pt` | `/mnt/workspace/TEMP-FILE-STATION/model.pt` |
 
-| 用途 | 路径 |
-|---|---|
-| WildDet3D 的 OSS 源文件 | `/mnt/lvyifan/wilddet3d_alldata_all_prompt_v1.0.pt` |
-| WildDet3D 的本地文件 | `/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt` |
-| LingBot-Depth 的 OSS 源文件 | `/mnt/lvyifan/model.pt` |
-| LingBot-Depth 的本地文件 | `/mnt/workspace/TEMP-FILE-STATION/model.pt` |
+两份文件合计 6,018,050,989 字节，约 6.02 GB。工作盘检查时剩余约 13 GB，需要为依赖、权重临时副本和输出留空间。编译与 pip 缓存放到 `/tmp`；该目录不能作为重建实例后的持久存储。复制前重新检查容量，已有副本重复制时也要计入 `.part` 的空间。
 
-**先复制两个模型文件。** 以下命令在服务器 SSH 终端执行。每次执行都会重新从 OSS 读取并复制，不会因为本地已有文件而跳过。每个文件先写入 `.part` 临时文件，复制成功且文件大小一致后，再替换本地正式文件；中途中断时，该文件已有的正式副本仍保留，下次重新执行即可。WildDet3D 权重约 4.7 GB，LingBot 文件约 1.28 GB；若已有旧文件，复制期间还需预留当前文件的一份临时副本空间。大小核对只用于检查长度一致，不代替校验和验证。
+以下每次重新读取 OSS 文件，先写临时副本，比较大小和 SHA256 后再替换正式文件。SHA256 会额外读取 OSS，速度取决于挂载吞吐。软链接到 OSS 不是本地副本。
 
 ```bash
 (
     set -e
+    df -h /mnt/workspace /tmp
     mkdir -p /mnt/workspace/TEMP-FILE-STATION
     for weight_name in wilddet3d_alldata_all_prompt_v1.0.pt model.pt; do
         oss_weight="/mnt/lvyifan/$weight_name"
@@ -487,271 +514,187 @@ python -m pip check
         test -s "$oss_weight"
         cp -- "$oss_weight" "${local_weight}.part"
         test "$(stat -c %s "$oss_weight")" -eq "$(stat -c %s "${local_weight}.part")"
+        oss_sha=$(sha256sum -- "$oss_weight")
+        copied_sha=$(sha256sum -- "${local_weight}.part")
+        test "${oss_sha%% *}" = "${copied_sha%% *}"
         mv -f -- "${local_weight}.part" "$local_weight"
         ls -lh "$local_weight"
     done
 )
 ```
 
-`/mnt/lvyifan` 是 OSS 挂载，复制过程仍会读取 OSS 数据，但不需要从外网下载。后续推理的 `checkpoint` 和 `lingbot_pretrained_model` 必须使用上表中的本地路径；不要将指向 OSS 源文件的软链接当成本地副本。
-
-**检查 LingBot 本地文件。** `build_model()` 已增加 `lingbot_pretrained_model` 参数，可以直接传入本地 `model.pt` 路径；省略参数时仍使用原来的 HuggingFace 仓库地址。`skip_pretrained=True` 仍需读取此文件中的 `model_config`，随后模型权重由 WildDet3D 阶段 3 文件加载。
-
-下面直接读取本地文件，不查询 HuggingFace 缓存。下载到暂存目录的文件无需转换成 Hub 缓存结构，也不再需要执行之前的 `hf_hub_download(..., local_files_only=True)` 检查。
+以下可先在 CPU 验证模型构建、配置与权重结构。必须显式传入两个本地路径，`skip_pretrained=True` 仍会从 LingBot 文件读取 `model_config`。CPU 构建不代表 PPU 推理成功。
 
 ```bash
 source /mnt/workspace/venvs/wilddet3d-ppu/bin/activate
-cd /mnt/workspace/WildDet3D
-python -B - <<'PY'
+cd /mnt/workspace/wilddet3d
+export SAM3_COMPILE=0
+export XFORMERS_DISABLED=1
+HF_HUB_OFFLINE=1 python -B - <<'PY'
 from pathlib import Path
 import torch
-
-path = Path("/mnt/workspace/TEMP-FILE-STATION/model.pt")
-assert path.is_file(), f"LingBot 文件不存在：{path}"
-ckpt = torch.load(path, map_location="cpu", weights_only=True)
-assert isinstance(ckpt, dict) and isinstance(ckpt.get("model_config"), dict), \
-    "文件中缺少有效的 model_config，请确认下载的是对应 LingBot 模型的 model.pt"
-print("LingBot 本地配置读取通过：", path)
-PY
-```
-
-**调用本地权重。** 完成两个文件的本地复制后，可以先单独检查模型加载。下面使用 `HF_HUB_OFFLINE=1` 禁止本次命令访问 Hub，并通过两个路径参数直接读取本地文件。
-
-```bash
-source /mnt/workspace/venvs/wilddet3d-ppu/bin/activate
-cd /mnt/workspace/WildDet3D
-export SAM3_COMPILE=0
-HF_HUB_OFFLINE=1 python -B - <<'PY'
 from wilddet3d import build_model
 
+checkpoint = "/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt"
+lingbot = "/mnt/workspace/TEMP-FILE-STATION/model.pt"
+assert Path(checkpoint).is_file() and Path(lingbot).is_file()
+config = torch.load(lingbot, map_location="cpu", weights_only=True)
+assert isinstance(config, dict) and isinstance(config.get("model_config"), dict)
+del config
 model = build_model(
-    checkpoint="/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt",
-    lingbot_pretrained_model="/mnt/workspace/TEMP-FILE-STATION/model.pt",
+    checkpoint=checkpoint,
+    lingbot_pretrained_model=lingbot,
     skip_pretrained=True,
     canonical_rotation=True,
     score_threshold=0.3,
-    device="cuda",
+    device="cpu",
 )
-print("本地权重模型加载通过")
+# build_model 使用 strict=False，额外核对键和形状，避免遗漏参数未被发现。
+ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
+actual = {
+    k.replace("model.", "") if k.startswith("model.") else k: v
+    for k, v in ckpt.get("state_dict", ckpt).items()
+}
+expected = model.wilddet3d.state_dict()
+missing = sorted(set(expected) - set(actual))
+unexpected = sorted(set(actual) - set(expected))
+shape_errors = [k for k in set(expected) & set(actual)
+                if expected[k].shape != actual[k].shape]
+assert not missing and not unexpected and not shape_errors, (missing, unexpected, shape_errors)
+print("CPU 离线模型构建及权重结构检查通过；仍需 PPU 图像推理")
 PY
 ```
 
-模型加载通过后，继续运行下方的 ego 数据预标注示例，它已使用相同的两个本地路径。这种调用无需预先准备 LingBot 的 Hub 缓存；若遗漏 `lingbot_pretrained_model`，仍会走默认的仓库／缓存查找流程。加载成功只是检查权重与模型构建，完成单张图的前向推理和输出核对后才算跑通最小流程。
+#### 6. 单图推理、批量验收与镜像复现
 
-#### 6. 首次推理与故障定位
-
-先运行[ego 数据预标注示例](#ego-preannotation)，从单张图开始。采用 FP32、`SAM3_COMPILE=0`，不调用 `optimize_for_inference()`。完成图像输入、模型加载、前向推理和输出核对后，才算跑通最小流程。96 GiB 是设备容量，不是已经测得的模型峰值占用。
-
-| 现象 | 优先检查 |
-|---|---|
-| DSW 能看到 PPU，Python 看不到 | 当前解释器、设备挂载及可见设备设置；不要把受限工具的失败直接等同于驱动损坏 |
-| pip 要求安装 torch 2.5.1 | 是否误用原 `requirements.txt`，或未设置保护约束 |
-| `No module named sam3`／`mdm` | 子模块是否完整，以及是否从项目根目录执行 |
-| `No module named vis4d_cuda_ops`／`undefined symbol` | 扩展是否在当前 PPU PyTorch 环境重新编译；是否混入 NVIDIA 二进制 |
-| NMS 无法在 CUDA 设备执行 | 检查是否仍在使用镜像提供的 PPU torchvision，并重跑基础算子检查 |
-| `utils3d` 缺少 `pt`／`np` | 核实是否装成了 PyPI 同名包，应使用项目指定的 Git 仓库版本 |
-| `pkg_resources` 无法导入 | 核实当前环境是否保持 `setuptools<80` |
-| torchvision 提示缺少 `libjpeg.so.8` | 当前镜像的图像扩展警告；本页用 Pillow 读取图像，仍须单独验证 NMS，不能据此忽略所有 torchvision 错误 |
-| 缺少 `libGL.so.1`／`libgthread-2.0.so.0`／`libglib-2.0.so.0` | 按[OpenCV 系统运行库步骤](#ppu-opencv-system-libs)安装 `libgl1`、`libglib2.0-0t64`，先验证 `import cv2`，再验证 WildDet3D 导入 |
-| `mkl 2021.1.1 requires intel-openmp`／`tbb` | 已确认是基础镜像已有的依赖缺失，与 OpenCV 动态库错误分开处理；安装 OpenGL／GLib 不会修复此项 |
-| 从 OSS 复制权重后仍访问 HuggingFace | `checkpoint` 与 `lingbot_pretrained_model` 是否都传入本地暂存路径；是否设置 `skip_pretrained=True`；网页仍需检查其默认 LingBot 缓存及本地 WildDet3D 文件名 |
-| 编译／Triton／注意力算子报错 | 记录具体堆栈，确认 PPU 软件栈支持情况，再决定是否需要获准修改代码 |
-| 图像能推理但 3D 框尺度或投影不正确 | 检查相机内参、图像旋转／裁剪、畸变、深度单位、尺寸顺序与坐标系 |
-
-每次重新连接 SSH 后，至少恢复以下环境变量；安装新依赖时仍保留 `PIP_CONSTRAINT`：
+恢复运行环境并选择仓库自带图片。首次用 `--max-images 1` 只处理排序后的第一张，生成原始 JSON、筛选 JSON 和预览 PNG。命令行入口自动设置离线模式、关闭 SAM3 编译及 xFormers，并使用 FP32。
 
 ```bash
 source /mnt/workspace/venvs/wilddet3d-ppu/bin/activate
-cd /mnt/workspace/WildDet3D
+cd /mnt/workspace/wilddet3d
 export PIP_CONSTRAINT="$VIRTUAL_ENV/ppu-constraints.txt"
-export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HOME=/mnt/workspace/.cache/wilddet3d-huggingface
-export SAM3_COMPILE=0
+python scripts/annotate_ego.py \
+  --input demo/vlm/assets \
+  --output /mnt/workspace/ego/wilddet3d_demo \
+  --classes person chair table \
+  --max-images 1
 ```
+
+单图通过后，把 `--input` 改为实际 RGB 目录，按图片内容设置 `--classes`，先用 `--max-images 20` 处理代表性图像；验收后去掉数量限制并加 `--resume` 处理全部。数量限制包含已复用的图片，并非额外新增的图片数。不同输入或类别使用不同输出目录；修改内参后也应使用新的输出目录。不存在匹配目标时空输出可以是合法结果，但仍需人工检查漏检。
+
+| 验收阶段 | 必须确认的结果 |
+|---|---|
+| 设备／依赖 | PPU 基础算子、项目导入、扩展设备检查通过；核心包版本不变；项目相关依赖冲突解决 |
+| 权重 | 文件校验一致；LingBot 配置有效；模型权重键和形状匹配 |
+| 单张图片 | 完整 PPU 前向成功；输出数量一致、数值有限、尺寸为正；JSON 与预览图对应 |
+| 小批量 | 检查漏检、误检、尺度、朝向及内参；记录耗时、峰值显存和失败图片 |
+| 全量预标注 | 明确类别提示、阈值、输入版本及坐标系；确认目标标注平台的转换格式 |
+| 优化／网页 | 在基础流程通过后单独验证，不把 NVIDIA 上的加速数据当成 PPU 性能 |
+
+验证通过后在 `/mnt/workspace/wilddet3d-runtime/` 保存 `pip freeze`、依赖检查结果、权重校验和、PPU SDK 版本、项目提交及 Git 依赖提交，再按 DSW 控制台的镜像保存流程记录实际镜像标识。不同实例对工作盘、OSS 挂载和镜像保存的范围可能不同：重新创建实例后检查源码目录、venv、权重和挂载是否仍在，不假定 `/mnt/workspace` 或 `/tmp` 自动进入镜像。大权重从 OSS 恢复，不提交到 Git。
+
+常见错误的处理顺序：
+
+| 现象 | 检查方式 |
+|---|---|
+| DSW 或 Python 无法访问 PPU | 当前解释器、设备挂载、CUDA_HOME 和运行库；先在实际终端复核 |
+| pip 提出替换 Torch | 是否误用了根清单或遗漏 PIP_CONSTRAINT；停止解析，不安装替代 NVIDIA wheel |
+| 缺少 utils3d 或其 API | Git 来源、安装版本及提交；检查 `utils3d.pt`，不使用无关同名包 |
+| Pydantic／NumPy／OpenCV 冲突 | 是否继承了 vLLM 或其他项目依赖；精简专用镜像，不混装 cv2 提供者 |
+| 扩展导入失败或 undefined symbol | 是否使用本环境 Torch 和 PPU 工具链编译；是否混入不匹配的二进制 |
+| 权重加载仍请求 Hub | 两个本地路径和 skip_pretrained；网页还需另行处理默认 Hub 来源 |
+| 注意力／Stream／Triton 报错 | 保留完整堆栈；确认源码开关及 SDK 能力，必要补丁先取得用户同意 |
+| 框尺度或投影异常 | 图像几何处理、真实内参、深度单位、尺寸顺序和坐标系 |
+
+本流程优先使用已有参数和环境开关。任何新的项目代码、依赖清单或第三方源码修改，都先给出具体文件、原因和补丁范围，取得用户同意后执行。
 
 <a id="ego-preannotation"></a>
 
 ### ego 数据预标注
 
-当前目标是使用已训练权重生成预标注，无需执行后文的训练或基准评测。下面提供**普通 RGB 图片目录 → 逐张推理 → 项目自定义 JSON + 画框预览图**的入口。此 JSON 是便于后续转换的中间结果，并非某个标注平台可直接导入的标准格式。当前已从 EgoSuite 的 OSS 挂载复制两段去畸变头戴视频到本地并抽取 19 张图片，保存在 `/mnt/workspace/ego/images`；所选 episode 中没有实际深度数据，可以先使用单目模式。
+使用 [scripts/annotate_ego.py](scripts/annotate_ego.py) 直接指定输入、输出和参数，无需复制 Python 脚本。当前入口支持**单张 RGB 图片或递归图片目录 + 文本类别提示**，生成项目自定义预标注 JSON 和 3D 框预览图；JSON 是后续转换的中间结果，需按目标标注平台要求转换。普通视频先使用已有抽帧脚本，再把图片目录作为输入。
 
-| 数据情况 | 使用方式 |
-|---|---|
-| 普通 RGB 图片 | 先对少量图片运行文本提示，检查类别与框质量 |
-| 普通视频 | 先按任务需要抽帧并保留原视频名、帧号、时间戳；逐帧检测不自动产生跨帧实例 ID |
-| 已有 2D 框 | 使用 `input_boxes` 与 `prompt_text="geometric"`；提示框坐标为原图像素 xyxy；首次先对单张图中的单个框验证 |
-| 有真实内参 | 传入与当前图像分辨率、裁剪和旋转一致的 3×3 内参矩阵 |
-| 无内参 | 可先用默认内参观察结果，但不能将预测尺度视为标定真值；若启用 `use_predicted_intrinsics=True`，还需正确保存和还原预测内参 |
-| 有深度 | 将深度对齐到输入 RGB，保持原图分辨率、float32、单位米，同时设置 `use_depth_input_test=True`、`preprocess(..., depth=...)`、`depth_gt=...` |
-| 鱼眼／广角 ego 相机 | 先使用真实标定将图像转换到合适的针孔视图，并使用变换后的内参；仅填写四个内参数值不能替代去畸变 |
-| Project Aria VRS／位姿数据 | 参阅 [Boxer 集成说明](demo/boxer/README.md)，涉及额外依赖和坐标变换，尚未在本 PPU 实例验证 |
-
-下面的示例可直接复制到激活了 `wilddet3d-ppu` 的服务器终端执行。`max_images = None` 会处理全部图片（当前抽帧样本共 19 张）；设为 `1` 则只处理排序后的第一张，即使这张已有 JSON，也不会自动继续到第二张。新推理会从抽帧脚本生成的 `extraction_manifest.json` 按图片查找对应内参；也可用 `intrinsics_path` 显式指定统一内参，但仅适用于同一相机和图像几何处理。没有标定时仍使用默认内参，并在 JSON 中记录来源。
-
-结果 JSON 保存在 `/mnt/workspace/ego/wilddet3d_predictions`，画框图片保存在 `/mnt/workspace/ego/wilddet3d_visualizations`，都保留输入的子目录结构。**已有 JSON 会直接用于画图，不会重复推理或覆盖预测记录。** 若要改类别或使用真实内参重新推理，设置新的 `output_dir` 和 `visualization_dir`（例如各加 `_calibrated` 后缀），避免复用旧结果。旧 JSON 的 3D 框必须用它保存的 `intrinsics_original` 投影，不能只换绘图内参来修正预测。
-
-本示例明确要求 **2D 分数和 3D 分数都不低于 0.5**，满足条件的目标另存到 `/mnt/workspace/ego/wilddet3d_predictions_filtered`。原始 JSON 保留用于复用和调整阈值；筛选后的 JSON 与预览图使用同一批目标。这里调整的是置信度阈值，不会更改模型权重。预览图叠加彩色 3D 框，并保留类别和分数文字标签，不显示 2D 矩形。
+在已完成设备、依赖及权重检查的专用环境中执行：
 
 ```bash
-python - <<'PY'
-import json
-from itertools import islice
-from pathlib import Path
+source /mnt/workspace/venvs/wilddet3d-ppu/bin/activate
+cd /mnt/workspace/wilddet3d
 
-import numpy as np
-import torch
-from PIL import Image
-from wilddet3d import build_model, preprocess
-from wilddet3d.vis.visualize import draw_3d_boxes
+# 首次只处理一张；目录须已存在并包含 RGB 图片。
+python scripts/annotate_ego.py \
+  --input /mnt/workspace/ego/images \
+  --output /mnt/workspace/ego/wilddet3d_results \
+  --classes "sheep" basket shelf \
+  --max-images 1
 
-image_dir = Path("/mnt/workspace/ego/images")  # 改为真实图片目录
-output_dir = Path("/mnt/workspace/ego/wilddet3d_predictions")
-filtered_output_dir = Path("/mnt/workspace/ego/wilddet3d_predictions_filtered")
-visualization_dir = Path("/mnt/workspace/ego/wilddet3d_visualizations")
-manifest_path = Path("/mnt/workspace/ego/extraction_manifest.json")
-intrinsics_path = None  # None：优先按抽帧记录读取各张图片的内参
-class_names = ["cardboard box", "basket", "shelf"]
-max_images = None  # 处理全部图片；设为 1 则只处理第一张
-score_2d_threshold = 0.5
-score_3d_threshold = 0.5
-
-assert image_dir.is_dir(), f"图片目录不存在：{image_dir}"
-paths = sorted(p for p in image_dir.rglob("*")
-               if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
-assert paths, "目录中没有找到图片"
-frame_metadata = {}
-if manifest_path.is_file():
-    manifest = json.loads(manifest_path.read_text())
-    frame_metadata = {
-        frame["image"]: frame
-        for video in manifest["videos"] for frame in video["frames"]
-    }
-
-# 仅在某张图片没有预测 JSON 时加载模型；已有结果画图只需要 CPU。
-model = None
-
-def cpu_list(tensor):
-    return tensor.detach().cpu().tolist()
-
-with torch.inference_mode():
-    for path in islice(paths, max_images):
-        relative = path.relative_to(image_dir)
-        # 保留子目录和原始扩展名，避免不同图像的同名结果相互覆盖。
-        target = output_dir / relative.parent / (relative.name + ".json")
-        filtered_target = filtered_output_dir / relative.parent / (relative.name + ".json")
-        visualization_target = visualization_dir / relative.parent / (relative.name + ".png")
-        image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
-        if target.exists():
-            record = json.loads(target.read_text())
-            assert record["image"] == relative.as_posix()
-            assert record["image_hw"] == list(image.shape[:2])
-            print("使用已有预测：", target, "类别：", record["class_names"])
-        else:
-            frame = frame_metadata.get(relative.as_posix(), {})
-            selected_intrinsics_path = intrinsics_path or frame.get("intrinsics")
-            intrinsics = None
-            intrinsics_source = "default_placeholder"
-            if selected_intrinsics_path is not None:
-                intrinsics = np.load(selected_intrinsics_path).astype(np.float32)
-                assert intrinsics.shape == (3, 3) and np.isfinite(intrinsics).all()
-                if intrinsics_path is None and frame.get("image_hw") is not None:
-                    assert frame["image_hw"] == list(image.shape[:2]), "图片尺寸与标定记录不一致"
-                intrinsics_source = "provided" if intrinsics_path is not None else "extraction_manifest"
-            if model is None:
-                assert torch.cuda.is_available(), "当前环境无法访问 PPU"
-                model = build_model(
-                    checkpoint="/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt",
-                    lingbot_pretrained_model="/mnt/workspace/TEMP-FILE-STATION/model.pt",
-                    skip_pretrained=True,
-                    canonical_rotation=True,
-                    score_threshold=0.3,
-                    device="cuda",
-                )
-            data = preprocess(image.astype(np.float32), intrinsics)
-            results = model(
-                images=data["images"].cuda(),
-                intrinsics=data["intrinsics"].cuda()[None],
-                input_hw=[data["input_hw"]],
-                original_hw=[data["original_hw"]],
-                padding=[data["padding"]],
-                input_texts=class_names,
-            )
-            boxes, boxes3d, scores, scores_2d, scores_3d, class_ids, depth_maps = results
-            record = {
-                "image": relative.as_posix(),
-                "image_hw": list(image.shape[:2]),
-                "class_names": class_names,
-                "coordinate_system": "camera_opencv",
-                "length_unit": "meter",
-                "box3d_fields": ["cx", "cy", "cz", "W", "L", "H", "qw", "qx", "qy", "qz"],
-                "intrinsics_source": intrinsics_source,
-                "intrinsics_path": str(selected_intrinsics_path) if selected_intrinsics_path else None,
-                "intrinsics_original": cpu_list(data["original_intrinsics"]),
-                "boxes2d_xyxy": cpu_list(boxes[0]),
-                "boxes3d": cpu_list(boxes3d[0]),
-                "scores": cpu_list(scores[0]),
-                "scores_2d": cpu_list(scores_2d[0]),
-                "scores_3d": cpu_list(scores_3d[0]),
-                "class_ids": cpu_list(class_ids[0]),
-            }
-            payload = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("x", encoding="utf-8") as stream:
-                stream.write(payload)
-            print("已保存预测：", target)
-
-        # 显式分别判断两种分数；build_model 的 score_threshold 是综合分数阈值。
-        keep = (
-            (np.asarray(record["scores_2d"]) >= score_2d_threshold)
-            & (np.asarray(record["scores_3d"]) >= score_3d_threshold)
-        )
-        filtered_record = dict(record)
-        for key in ("boxes2d_xyxy", "boxes3d", "scores", "scores_2d", "scores_3d", "class_ids"):
-            assert len(record[key]) == len(keep), f"预测字段长度不一致：{key}"
-            filtered_record[key] = [value for value, retained in zip(record[key], keep) if retained]
-        filtered_record["score_filter"] = {
-            "score_2d_min": score_2d_threshold,
-            "score_3d_min": score_3d_threshold,
-            "condition": "scores_2d >= score_2d_min AND scores_3d >= score_3d_min",
-        }
-        filtered_record["source_prediction"] = str(target)
-        filtered_target.parent.mkdir(parents=True, exist_ok=True)
-        filtered_target.write_text(
-            json.dumps(filtered_record, ensure_ascii=False, indent=2, allow_nan=False),
-            encoding="utf-8",
-        )
-
-        # 在原图上投影：使用预测时保存的原图内参，不使用缩放补边后的内参。
-        rendered = draw_3d_boxes(
-            image=image,
-            boxes3d=np.asarray(filtered_record["boxes3d"], dtype=np.float32).reshape(-1, 10),
-            intrinsics=np.asarray(filtered_record["intrinsics_original"], dtype=np.float32),
-            scores_2d=np.asarray(filtered_record["scores_2d"], dtype=np.float32),
-            scores_3d=np.asarray(filtered_record["scores_3d"], dtype=np.float32),
-            class_ids=np.asarray(filtered_record["class_ids"], dtype=np.int64),
-            class_names=filtered_record["class_names"],
-            draw_predicted_2d_boxes=False,
-            score_2d_threshold=0.0,  # 已按上面的双阈值筛选，绘图不再额外筛选
-            score_3d_threshold=0.0,
-            line_width=3,
-            font_size=20,
-        )
-        visible_count = len(filtered_record["boxes3d"])
-        visualization_target.parent.mkdir(parents=True, exist_ok=True)
-        rendered.save(visualization_target)
-        print("已保存画框图片：", visualization_target,
-              "预测目标数：", len(record["boxes3d"]), "满足画图阈值：", visible_count)
-        print("已保存筛选后 JSON：", filtered_target)
-PY
+# 验收通过后处理全部；校验并复用第一张的预测。
+python scripts/annotate_ego.py \
+  --input /mnt/workspace/ego/images \
+  --output /mnt/workspace/ego/wilddet3d_results \
+  --classes "cardboard box" basket shelf \
+  --resume
 ```
 
-运行后，可在 VS Code 远程文件浏览器中直接打开 `wilddet3d_visualizations` 下的 PNG，彩色线框表示投影到图像上的 3D 包围框，标签显示类别及 2D／3D 分数。修改 `score_2d_threshold`、`score_3d_threshold` 可调整筛选标准；没有目标满足条件时仍保存原图，并在筛选后的 JSON 中保存空列表。这些预览图适合检查投影、漏检和误检，并不代表 3D 尺寸或朝向已通过验证。
+`--input` 也可以是 `/mnt/workspace/ego/images/example.jpg`。目录输入按相对路径排序，支持 JPG、JPEG、PNG、BMP、WEBP、TIF、TIFF，不区分扩展名大小写。如果输出位于输入目录内，扫描时会排除输出目录。`--max-images` 限制本次选择的总图片数，包含已复用的图片；不填写时处理全部。
 
-**文本提示与设备：** 提示词由上面代码中的 `class_names` 定义，通过 `input_texts=class_names` 传入。它是可自行修改的开放词汇提示列表，不是固定类别白名单；识别效果仍取决于图像和模型能力。新推理通过 `device="cuda"` 和 `.cuda()` 在 PPU 镜像的兼容接口上运行；读取已有 JSON、筛选和画图则在 CPU 上进行。`SAM3_COMPILE=0` 只关闭编译优化，不会关闭 PPU 推理。可在另一个 DSW 终端运行 `ppu-smi` 查看实际设备内存和利用率。
+| 参数 | 默认值／作用 |
+|---|---|
+| `--input` | 必填；单张图片或图片目录 |
+| `--output` | 必填；结果根目录，自动创建 |
+| `--classes` | `"cardboard box" basket shelf`；英文开放词汇提示，含空格的类别加引号 |
+| `--checkpoint` | `/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt` |
+| `--lingbot-checkpoint` | `/mnt/workspace/TEMP-FILE-STATION/model.pt` |
+| `--score-2d`、`--score-3d` | 均为 `0.5`；保留同时满足两个阈值的目标，范围 0～1 |
+| `--model-score-threshold` | `0.3`；模型内部综合分数初筛阈值，改变后需要重新推理 |
+| `--intrinsics` | 可选；统一的 3×3 内参 `.npy` 文件，优先于 manifest |
+| `--manifest` | 可选；已有抽帧脚本生成的 `extraction_manifest.json`，读取逐图内参 |
+| `--max-images` | 可选；正整数，不填则处理全部 |
+| `--device` | `cuda`；在 PPU 镜像的 CUDA 兼容接口上推理，也支持 `cuda:N` |
+| `--no-vis` | 只输出 JSON；会清除本次所选图片已有的预览，避免遗留旧阈值的画框图 |
+| `--resume` | 校验并复用完整预测，继续未完成的图片；筛选 JSON 和预览重新生成 |
+| `--help` | 显示全部参数，不加载模型 |
 
-当前源码 `wilddet3d/head/coder_3d.py` 的 3D 框排列为 **`[cx, cy, cz, W, L, H, qw, qx, qy, qz]`**，中心在相机坐标系中，长度单位为米，四元数为 `wxyz`；不要按子文档中不同的尺寸顺序读取。相机坐标使用 x 向右、y 向下、z 向前的约定；规范物体局部轴为 x 对应 L、y 对应 H、z 对应 W。转换到世界坐标、机器人坐标或其他标注格式时，需要真实外参和明确的轴约定，不能仅交换尺寸字段。
+有统一真实内参时，在上述命令后加 `--intrinsics /mnt/workspace/ego/calibration/intrinsics.npy`；只有同一相机且分辨率、裁剪、旋转等图像处理一致时，才能对所有图片共用内参。使用逐视频标定的抽帧结果时，加 `--manifest /mnt/workspace/ego/extraction_manifest.json`。manifest 的 `image` 按输入目录或 manifest 同级的 `images/` 目录匹配，相对内参路径以 manifest 所在目录为基准。记录中的图片尺寸不一致会报错。
 
-保存预测不等于完成准确标注。先人工检查代表性 ego 帧的漏检、误检、尺度和朝向，再扩展到全量数据；遮挡、运动模糊和视角差异会影响结果。若需要跨帧 ID、人工调整 3D 框、指定数据集格式或完整视频批处理，应另行确定需求并在修改代码前取得同意。
+没有指定内参，或 manifest 中没有对应标定时，使用默认占位内参：`fx = fy = max(H, W)`、`cx = W/2`、`cy = H/2`，并记录 `intrinsics_source="default_placeholder"`。这只能用于先观察结果，不能将尺度视为标定真值。鱼眼／广角图片先转换为适合的针孔视图，并使用变换后的内参。
+
+输出目录结构如下，保留输入的子目录和原始扩展名，避免不同目录及同名 JPG／PNG 的结果相互覆盖：
+
+```text
+wilddet3d_results/
+├── run_config.json              # 本次参数、权重/源码 SHA256 和依赖版本
+├── summary.json                 # 成功、失败、新推理、复用数量及逐图耗时/显存
+├── predictions/scene/frame.jpg.json  # 模型初筛后的原始预测，保留用于复用
+├── filtered/scene/frame.jpg.json     # 按 score-2d 和 score-3d 同时筛选
+└── previews/scene/frame.jpg.png       # 与筛选 JSON 对应的 3D 框及类别/分数标签
+```
+
+首次输出使用空目录；有运行记录时必须明确加 `--resume`。每次运行会读取权重计算 SHA256，数 GB 权重的校验会有磁盘读取开销。复用时检查输入路径、权重内容、类别顺序、模型参数、设备、源码和依赖版本，再逐张检查图片内容与实际内参。发现不匹配时停止，不覆盖原始预测。新增图片可继续推理，同一进程只加载一次模型。写入 JSON 和预览使用临时文件再原子提交，避免中断留下半个文件；同一输出目录不能同时运行两个任务。
+
+只调整最终筛选阈值时，用相同输入和输出加 `--resume`，无需重新推理：
+
+```bash
+python scripts/annotate_ego.py \
+  --input /mnt/workspace/ego/images \
+  --output /mnt/workspace/ego/wilddet3d_results \
+  --classes "cardboard box" basket shelf \
+  --score-2d 0.6 --score-3d 0.6 \
+  --resume
+```
+
+筛选和绘图可以在 CPU 上复用已有预测，仍须保留两个本地权重文件和原运行环境供校验；如果所选图片缺少预测，则仍需 PPU。降低最终筛选阈值不会恢复模型初筛时已剔除的目标；要改变模型初筛阈值，请指定新的输出目录重新推理。没有目标满足最终阈值时，筛选 JSON 保存空列表，预览保存原图。首个运行错误会停止任务，并在 `summary.json` 记录失败图片；修复后用相同命令加 `--resume` 继续。输入和缓存的预检查错误在写入前直接报错。
+
+3D 框为 **`[cx, cy, cz, W, L, H, qw, qx, qy, qz]`**，长度单位米，四元数顺序 `wxyz`。相机坐标系为 x 向右、y 向下、z 向前；规范物体局部轴为 x 对应 L、y 对应 H、z 对应 W。预览使用预测时保存的原图内参，不显示 2D 矩形。转换到世界坐标或其他标注格式还需要真实外参和明确的轴约定。
+
+前向计时包含输入传输，不包含模型构建、权重加载和预处理；首次前向还包含内核初始化。峰值张量显存不包含驱动等全部设备占用，可结合 `ppu-smi` 观察。复用记录的耗时／显存来自原推理，汇总中用 `metrics_reused` 标记。先人工检查代表性 ego 帧的漏检、误检、尺度和朝向，再扩展到全量数据。
+
+| 其他数据需求 | 当前处理方式 |
+|---|---|
+| 已有 2D 框／点提示 | 继续使用 Python 接口的 `input_boxes`／`input_points`，当前 CLI 未接入 |
+| RGB 对齐深度 | 继续使用 Python 接口；深度 float32、单位米，设置深度输入参数 |
+| 视频、跨帧实例 ID | 视频先抽帧；逐帧检测不自动生成跨帧 ID |
+| Project Aria VRS／位姿 | 参阅 [Boxer 集成说明](demo/boxer/README.md)，尚未在本 PPU 实例验证 |
 
 <a id="vscode-ssh"></a>
 
@@ -759,14 +702,14 @@ PY
 
 VS Code SSH 既可以运行上面的命令行推理，也能转发网页端口。**当前网页环境存在需要先处理的依赖冲突：** [vis4d 1.0.0 发布元数据](https://pypi.org/pypi/vis4d/1.0.0/json)要求 `pydantic<2.0.0`；项目演示依赖清单要求 `pydantic>=2.0`，Gradio 5 也使用 Pydantic 2（参见 [Gradio 5.49.1 发布元数据](https://pypi.org/pypi/gradio/5.49.1/json)）。因此不能把根目录安装流程与演示依赖直接叠加，也不能声称当前环境已支持一键启动网页。
 
-当前推荐先完成 Python 接口推理和 JSON 预标注。需要网页时，应在独立环境中评估 vis4d 的实际运行时依赖或前后端拆分方案；仅创建另一个虚拟环境不会自动解决上述冲突。不要通过忽略全部依赖、强制升级 Pydantic 或降到不匹配当前演示 API 的旧 Gradio 来掩盖问题。涉及依赖方案或代码改动时，先确认具体修改范围。
+先完成命令行推理和 JSON 预标注。网页阶段优先评估前后端拆分：PPU 推理进程保留 vis4d／Pydantic 1，独立网页进程使用 Gradio／Pydantic 2，通过接口提交图片与提示并取得结果。现有 app.py 把页面与模型加载放在同一进程，拆分需要新增接口及调整调用，必须先确认代码改动范围；网页拆分方案尚未实现。仅创建另一个 venv 不会自动让现有 app.py 解决冲突，不通过忽略全部依赖或强制升级掩盖问题。
 
 **以下为网页依赖兼容问题解决、导入与推理验证通过后的启动方式，并非当前已验证可执行的完整安装流程：**
 
-第 5 步和 Python 推理示例通过新参数直接读取 LingBot 本地文件；现有 `demo/huggingface/app.py` 尚未传入该参数，网页仍使用默认的 LingBot 仓库／Hub 缓存来源。因此，下面的软链接仅解决网页的 WildDet3D 权重路径；网页还需准备 LingBot 的 Hub 缓存，或另行修改其模型构建调用以传入本地文件。
+第 5 步和命令行入口直接读取 LingBot 本地文件；现有 `demo/huggingface/app.py` 尚未传入该参数，网页仍使用默认的 LingBot 仓库／Hub 缓存来源。因此，下面的软链接仅解决网页的 WildDet3D 权重路径；网页还需准备 LingBot 的 Hub 缓存，或另行修改其模型构建调用以传入本地文件。
 
 ```bash
-cd /mnt/workspace/WildDet3D
+cd /mnt/workspace/wilddet3d
 
 # 网页只查找 ckpt/wilddet3d.pt，否则会调用 HuggingFace 下载。
 # 完成第 5 步的本地复制后，为网页建立指向本地副本的软链接。
@@ -789,7 +732,7 @@ python demo/huggingface/app.py
 ssh -N -L 127.0.0.1:7860:127.0.0.1:7860 your-dsw-host
 ```
 
-网页支持文本、框和点提示，可查看叠加图、深度图及鸟瞰视图。已知内参时勾选 `Use Actual Intrinsics`，填写 `fx`、`fy`、`cx`、`cy`；文本类别可输入 `person.chair.table`。当前页面中的类别附加控件被隐藏，也没有人工拖拽编辑 3D 框、批量任务管理及标准标注文件导出功能。网页适合抽样检查，保存预标注请使用前面的 Python 接口。
+网页支持文本、框和点提示，可查看叠加图、深度图及鸟瞰视图。已知内参时勾选 `Use Actual Intrinsics`，填写 `fx`、`fy`、`cx`、`cy`；文本类别可输入 `person.chair.table`。当前页面中的类别附加控件被隐藏，也没有人工拖拽编辑 3D 框、批量任务管理及标准标注文件导出功能。网页适合抽样检查，批量保存预标注请使用前面的命令行入口。
 
 <a id="inference"></a>
 
