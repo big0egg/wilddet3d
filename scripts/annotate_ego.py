@@ -24,7 +24,7 @@ import traceback
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WEIGHT_ROOT = Path("/mnt/workspace/TEMP-FILE-STATION")
+WEIGHT_ROOT = Path("/root/wilddet3d-weights")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 PREDICTION_FIELDS = ("boxes2d_xyxy", "boxes3d", "scores", "scores_2d", "scores_3d", "class_ids")
 BOX3D_FIELDS = ["cx", "cy", "cz", "W", "L", "H", "qw", "qx", "qy", "qz"]

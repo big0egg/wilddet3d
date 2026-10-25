@@ -202,7 +202,7 @@ PPU 用户先完成[专用安装流程](#aliyun-ppu)，再按其中第 5 步从 
 | `wilddet3d_stage2_alldata_12e_v1.0.pt` | 阶段 2（中间权重） | 阶段 1 权重 &rarr; 8 个数据集的全量数据微调，12 轮 | ~4.7 GB | [allenai/WildDet3D](https://huggingface.co/allenai/WildDet3D/resolve/main/wilddet3d_stage2_alldata_12e_v1.0.pt) |
 | `wilddet3d_stage1_omni3d_12e_v1.0.pt` | 阶段 1（中间权重） | 仅使用 Omni3D、规范旋转表示，从头训练 12 轮 | ~4.7 GB | [allenai/WildDet3D](https://huggingface.co/allenai/WildDet3D/resolve/main/wilddet3d_stage1_omni3d_12e_v1.0.pt) |
 
-三个权重采用相同架构（SAM3 ViT 骨干网络 + LingBot-Depth DINOv2 ViT-L/14 几何后端，约 12 亿参数），保存格式均为移除优化器状态后的 `state_dict` + `epoch`/`step` + `hparams`。按需要选择相应阶段；复现论文结果或直接推理时，使用 `wilddet3d_alldata_all_prompt_v1.0.pt`。
+三个权重采用相同架构（SAM3 ViT 骨干网络 + LingBot-Depth DINOv2 ViT-L/14 几何后端，约 12 亿参数），保存格式均为移除优化器状态后的 `state_dict` + `epoch`/`step` + `hparams`。按需要选择相应阶段；复现论文结果或直接推理时，使用 `wilddet3d_alldata_all_prompt_v1.0.pt`.
 
 ```bash
 # 下载论文发布权重（约 4.7 GB）
@@ -496,21 +496,21 @@ python -m pip check
 
 | 用途 | OSS 源文件 | 本地副本 |
 |---|---|---|
-| WildDet3D 阶段 3 | `/mnt/lvyifan/wilddet3d_alldata_all_prompt_v1.0.pt` | `/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt` |
-| LingBot 配置与模型 | `/mnt/lvyifan/model.pt` | `/mnt/workspace/TEMP-FILE-STATION/model.pt` |
+| WildDet3D 阶段 3 | `/mnt/lvyifan/wilddet3d_alldata_all_prompt_v1.0.pt` | `/root/wilddet3d-weights/wilddet3d_alldata_all_prompt_v1.0.pt` |
+| LingBot 配置与模型 | `/mnt/lvyifan/model.pt` | `/root/wilddet3d-weights/model.pt` |
 
-两份文件合计 6,018,050,989 字节，约 6.02 GB。工作盘检查时剩余约 13 GB，需要为依赖、权重临时副本和输出留空间。编译与 pip 缓存放到 `/tmp`；该目录不能作为重建实例后的持久存储。复制前重新检查容量，已有副本重复制时也要计入 `.part` 的空间。
+两份文件合计 6,018,050,989 字节，约 6.02 GB。权重存放在 `/root/wilddet3d-weights/`，使用根文件系统的空间；`/mnt/workspace` 工作盘保留源码、虚拟环境和输出。编译与 pip 缓存放到 `/tmp`；该目录不能作为重建实例后的持久存储。复制前重新检查容量，已有副本重复制时也要计入 `.part` 的空间。
 
 以下每次重新读取 OSS 文件，先写临时副本，比较大小和 SHA256 后再替换正式文件。SHA256 会额外读取 OSS，速度取决于挂载吞吐。软链接到 OSS 不是本地副本。
 
 ```bash
 (
     set -e
-    df -h /mnt/workspace /tmp
-    mkdir -p /mnt/workspace/TEMP-FILE-STATION
+    df -h /root /mnt/workspace /tmp
+    mkdir -p /root/wilddet3d-weights
     for weight_name in wilddet3d_alldata_all_prompt_v1.0.pt model.pt; do
         oss_weight="/mnt/lvyifan/$weight_name"
-        local_weight="/mnt/workspace/TEMP-FILE-STATION/$weight_name"
+        local_weight="/root/wilddet3d-weights/$weight_name"
         test -s "$oss_weight"
         cp -- "$oss_weight" "${local_weight}.part"
         test "$(stat -c %s "$oss_weight")" -eq "$(stat -c %s "${local_weight}.part")"
@@ -535,8 +535,8 @@ from pathlib import Path
 import torch
 from wilddet3d import build_model
 
-checkpoint = "/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt"
-lingbot = "/mnt/workspace/TEMP-FILE-STATION/model.pt"
+checkpoint = "/root/wilddet3d-weights/wilddet3d_alldata_all_prompt_v1.0.pt"
+lingbot = "/root/wilddet3d-weights/model.pt"
 assert Path(checkpoint).is_file() and Path(lingbot).is_file()
 config = torch.load(lingbot, map_location="cpu", weights_only=True)
 assert isinstance(config, dict) and isinstance(config.get("model_config"), dict)
@@ -592,7 +592,7 @@ python scripts/annotate_ego.py \
 | 全量预标注 | 明确类别提示、阈值、输入版本及坐标系；确认目标标注平台的转换格式 |
 | 优化／网页 | 在基础流程通过后单独验证，不把 NVIDIA 上的加速数据当成 PPU 性能 |
 
-验证通过后在 `/mnt/workspace/wilddet3d-runtime/` 保存 `pip freeze`、依赖检查结果、权重校验和、PPU SDK 版本、项目提交及 Git 依赖提交，再按 DSW 控制台的镜像保存流程记录实际镜像标识。不同实例对工作盘、OSS 挂载和镜像保存的范围可能不同：重新创建实例后检查源码目录、venv、权重和挂载是否仍在，不假定 `/mnt/workspace` 或 `/tmp` 自动进入镜像。大权重从 OSS 恢复，不提交到 Git。
+验证通过后在 `/mnt/workspace/wilddet3d-runtime/` 保存 `pip freeze`、依赖检查结果、权重校验和、PPU SDK 版本、项目提交及 Git 依赖提交，再按 DSW 控制台的镜像保存流程记录实际镜像标识。不同实例对工作盘、OSS 挂载和镜像保存的范围可能不同：重新创建实例后检查 `/root/wilddet3d-weights/`、源码目录、venv 和挂载是否仍在，不假定 `/mnt/workspace` 或 `/tmp` 自动进入镜像。大权重从 OSS 恢复，不提交到 Git。
 
 常见错误的处理顺序：
 
@@ -643,8 +643,8 @@ python scripts/annotate_ego.py \
 | `--input` | 必填；单张图片或图片目录 |
 | `--output` | 必填；结果根目录，自动创建 |
 | `--classes` | `"cardboard box" basket shelf`；英文开放词汇提示，含空格的类别加引号 |
-| `--checkpoint` | `/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt` |
-| `--lingbot-checkpoint` | `/mnt/workspace/TEMP-FILE-STATION/model.pt` |
+| `--checkpoint` | `/root/wilddet3d-weights/wilddet3d_alldata_all_prompt_v1.0.pt` |
+| `--lingbot-checkpoint` | `/root/wilddet3d-weights/model.pt` |
 | `--score-2d`、`--score-3d` | 均为 `0.5`；保留同时满足两个阈值的目标，范围 0～1 |
 | `--model-score-threshold` | `0.3`；模型内部综合分数初筛阈值，改变后需要重新推理 |
 | `--intrinsics` | 可选；统一的 3×3 内参 `.npy` 文件，优先于 manifest |
@@ -715,7 +715,7 @@ cd /mnt/workspace/wilddet3d
 # 完成第 5 步的本地复制后，为网页建立指向本地副本的软链接。
 # 若目标已存在，先检查它的路径，不要强制覆盖。
 mkdir -p ckpt
-ln -s /mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt ckpt/wilddet3d.pt
+ln -s /root/wilddet3d-weights/wilddet3d_alldata_all_prompt_v1.0.pt ckpt/wilddet3d.pt
 
 export SAM3_COMPILE=0
 export HF_HOME=/mnt/workspace/.cache/wilddet3d-huggingface
@@ -746,8 +746,8 @@ from PIL import Image
 
 # 构建模型
 model = build_model(
-    checkpoint="/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt",
-    lingbot_pretrained_model="/mnt/workspace/TEMP-FILE-STATION/model.pt",
+    checkpoint="/root/wilddet3d-weights/wilddet3d_alldata_all_prompt_v1.0.pt",
+    lingbot_pretrained_model="/root/wilddet3d-weights/model.pt",
     score_threshold=0.3,
     skip_pretrained=True,
     # 仅在后续向 model(...) 传入 depth_gt=... 时开启，
@@ -863,8 +863,8 @@ draw_3d_boxes(
 from wilddet3d import build_model, optimize_for_inference, preprocess
 
 model = build_model(
-    checkpoint="/mnt/workspace/TEMP-FILE-STATION/wilddet3d_alldata_all_prompt_v1.0.pt",
-    lingbot_pretrained_model="/mnt/workspace/TEMP-FILE-STATION/model.pt",
+    checkpoint="/root/wilddet3d-weights/wilddet3d_alldata_all_prompt_v1.0.pt",
+    lingbot_pretrained_model="/root/wilddet3d-weights/model.pt",
     skip_pretrained=True,
 )
 
